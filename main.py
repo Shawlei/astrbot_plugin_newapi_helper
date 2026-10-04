@@ -1677,7 +1677,7 @@ class NewAPIPlugin(Star):
                 f"🎲 {result}\n😢 猜错了，输掉 {self._fmt_quota(amount)}"
             )
 
-    # ---------- 对战平台（象棋 / 五子棋） ----------
+    # ---------- 对战平台（斗地主 / 象棋 / 五子棋） ----------
     @filter.command("象棋对战", alias={"象棋", "下象棋"})
     async def xiangqi_battle(self, event: AstrMessageEvent, bet: str = ""):
         if not self._cfg("slash_enabled", True):
@@ -1696,6 +1696,16 @@ class NewAPIPlugin(Star):
             return
         """五子棋对战：%五子棋对战 [押注美元]，匹配到对手后私聊发送房间码，凭码进入对战，真实额度结算"""
         async for r in self._battle_impl(event, "gomoku", bet):
+            yield r
+
+    @filter.command("斗地主", alias={"斗地主对战", "三人斗地主"})
+    async def doudizhu_battle(self, event: AstrMessageEvent, bet: str = ""):
+        if not self._cfg("slash_enabled", True):
+            return
+        if not self._group_allowed(event):
+            return
+        """斗地主：%斗地主 [底注美元]，三人一桌，匹配满 3 人后私聊发送房间码，凭码进入对战，真实额度结算"""
+        async for r in self._battle_impl(event, "doudizhu", bet):
             yield r
 
     @filter.command("游戏大厅", alias={"大厅", "游戏中心"})
@@ -1931,10 +1941,11 @@ class NewAPIPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     async def _battle_impl(self, event: AstrMessageEvent, game_type: str, bet: str = ""):
-        names = {"xiangqi": "中国象棋", "gomoku": "五子棋"}
+        names = {"xiangqi": "中国象棋", "gomoku": "五子棋", "doudizhu": "斗地主"}
         sides1 = {"xiangqi": "红方（先手）", "gomoku": "黑方（先手）"}
         sides2 = {"xiangqi": "黑方", "gomoku": "白方"}
-        cmds = {"xiangqi": "象棋对战", "gomoku": "五子棋对战"}
+        cmds = {"xiangqi": "象棋对战", "gomoku": "五子棋对战", "doudizhu": "斗地主"}
+        max_players = 3 if game_type == "doudizhu" else 2
 
         if not self._is_group(event):
             yield event.plain_result("请在群聊中使用对战")
@@ -1978,8 +1989,8 @@ class NewAPIPlugin(Star):
 
         if data.get("code") == "created":
             yield event.plain_result(
-                f"🎮 {names[game_type]}对战(1/2)，押注 ${final_bet:g}，等待对手加入\n"
-                f"对手发送 %{cmds[game_type]} 即可匹配，匹配成功后双方会收到房间码"
+                f"🎮 {names[game_type]}(1/{max_players})，押注 ${final_bet:g}，等待对手加入\n"
+                f"其他玩家发送 %{cmds[game_type]} 即可匹配，满 {max_players} 人后各玩家会收到房间码"
             )
             return
 
@@ -1988,13 +1999,34 @@ class NewAPIPlugin(Star):
         if not rid:
             yield event.plain_result("创建房间失败，请稍后再试")
             return
-        p1 = (room.get("players") or {}).get("1") or {}
-        if str(p1.get("qq")) == qq:
+        in_room = any(
+            isinstance(p, dict) and str(p.get("qq")) == qq
+            for p in (room.get("players") or {}).values()
+        )
+        if in_room:
             yield event.plain_result("你已发起过对战，正在等待对手加入，请稍候")
             return
 
         ok2, jd = await self._game_api(base, "POST", f"/api/room/{rid}/join", {"player": player})
-        if not ok2 or not isinstance(jd, dict) or jd.get("code") != "started":
+        if not ok2 or not isinstance(jd, dict):
+            err = "加入失败，请稍后再试"
+            if isinstance(jd, dict) and jd.get("error"):
+                err = str(jd["error"])
+            yield event.plain_result(err)
+            return
+
+        jcode = jd.get("code")
+        if jcode == "joined":
+            # 3 人游戏（斗地主）第 2 人已加入，还差最后一人
+            jroom = jd.get("room") or {}
+            filled = sum(1 for p in (jroom.get("players") or {}).values() if p)
+            yield event.plain_result(
+                f"🎮 {names[game_type]}({filled}/{max_players})，押注 ${final_bet:g}，还差一人\n"
+                f"最后一位玩家发送 %{cmds[game_type]} 即可开桌"
+            )
+            return
+
+        if jcode != "started":
             err = "加入失败，请稍后再试"
             if isinstance(jd, dict) and jd.get("error"):
                 err = str(jd["error"])
@@ -2003,13 +2035,36 @@ class NewAPIPlugin(Star):
 
         jroom = jd.get("room") or {}
         code = (jroom.get("code") or "").strip()
-        r1 = (jroom.get("players") or {}).get("1") or {}
-        r2 = (jroom.get("players") or {}).get("2") or {}
+        players = jroom.get("players") or {}
         if not code:
             yield event.plain_result("生成房间码失败，请稍后再试")
             return
         entry = "请到游戏大厅选择对应游戏（或直接打开游戏页），输入房间码进入对战"
 
+        if max_players == 3:
+            p1 = players.get("1") or {}
+            p2 = players.get("2") or {}
+            p3 = players.get("3") or {}
+            for pp in (p1, p2, p3):
+                mates = [x.get("name") for x in (p1, p2, p3) if x.get("qq") != pp.get("qq")]
+                await self._send_private(
+                    event, str(pp.get("qq")),
+                    f"🃏 {names[game_type]}匹配成功！\n"
+                    f"牌友：{'、'.join(mates)}\n底注：${final_bet:g}\n"
+                    f"房间码：{code}\n{entry}",
+                )
+            yield event.plain_result(
+                f"🃏 {names[game_type]}匹配成功！\n"
+                f"{p1.get('name')} / {p2.get('name')} / {p3.get('name')}，底注 ${final_bet:g}\n"
+                f"房间码已私聊发送，三人凭房间码进入对战"
+            )
+            asyncio.create_task(
+                self._battle_poll(base, rid, event.bot, gid, game_type, final_bet, p1, p2, p3)
+            )
+            return
+
+        r1 = players.get("1") or {}
+        r2 = players.get("2") or {}
         await self._send_private(
             event, str(r1.get("qq")),
             f"⚔️ {names[game_type]}对战匹配成功！\n"
@@ -2034,8 +2089,8 @@ class NewAPIPlugin(Star):
             self._battle_poll(base, rid, event.bot, gid, game_type, final_bet, r1, r2)
         )
 
-    async def _battle_poll(self, base, rid, bot, gid, game_type, bet_usd, p1, p2):
-        names = {"xiangqi": "中国象棋", "gomoku": "五子棋"}
+    async def _battle_poll(self, base, rid, bot, gid, game_type, bet_usd, p1, p2, p3=None):
+        names = {"xiangqi": "中国象棋", "gomoku": "五子棋", "doudizhu": "斗地主"}
         try:
             for _ in range(1200):  # 最多约 1 小时（3s × 1200）
                 await asyncio.sleep(3)
@@ -2044,6 +2099,9 @@ class NewAPIPlugin(Star):
                     continue
                 if data.get("state") != "finished":
                     continue
+                if game_type == "doudizhu":
+                    await self._ddz_report(bot, gid, data, p1, p2, p3, bet_usd)
+                    return
                 winner = int(data.get("winner") or 0)
                 reason = data.get("reason") or "正常结束"
                 s1 = (data.get("stats") or {}).get("1") or {}
@@ -2070,6 +2128,68 @@ class NewAPIPlugin(Star):
                 return
         except Exception as e:
             logger.error(f"[newapi] 对战轮询异常: {e}")
+
+    async def _ddz_report(self, bot, gid, data, p1, p2, p3, bet_usd):
+        """斗地主 3 人对局结束播报：读 ddzResult 计算三方净额并回群"""
+        try:
+            ddz = data.get("ddzResult") or {}
+            landlord = int(ddz.get("landlord") or 0)  # 地主座位 1/2/3
+            landlord_won = bool(ddz.get("landlordWon"))
+            mult = int(ddz.get("multiplier") or 1)
+            bomb = int(ddz.get("bombCount") or 0)
+            spring = int(ddz.get("spring") or 0)
+            degraded = bool(ddz.get("degraded"))
+            reason = data.get("reason") or ""
+            players = {1: p1, 2: p2, 3: p3}
+            landlord_p = players.get(landlord) or {}
+            ln = landlord_p.get("name") or landlord_p.get("qq")
+            farmers = [players.get(s) for s in (1, 2, 3) if s != landlord]
+            fnames = [f.get("name") or f.get("qq") for f in farmers]
+            stats = data.get("stats") or {}
+
+            if degraded:
+                money = "💰 结算：余额不足，已按各退本金处理"
+            elif landlord_won:
+                money = (
+                    f"💰 结算：地主 {ln} +${bet_usd * 2 * mult:g}，"
+                    f"农民各 -${bet_usd * mult:g}"
+                )
+            else:
+                money = (
+                    f"💰 结算：农民各 +${bet_usd * mult:g}，"
+                    f"地主 {ln} -${bet_usd * 2 * mult:g}"
+                )
+            head = (
+                f"🏆 地主 {ln} 获胜！{fnames[0]}、{fnames[1]} 落败"
+                if landlord_won
+                else f"🏆 农民 {fnames[0]}、{fnames[1]} 获胜！地主 {ln} 落败"
+            )
+            extra = []
+            if mult > 1:
+                extra.append(f"倍数 ×{mult}")
+            if bomb:
+                extra.append(f"炸弹 ×{bomb}")
+            if spring == 1:
+                extra.append("春天")
+            elif spring == 2:
+                extra.append("反春")
+            extra_txt = ("（" + " · ".join(extra) + "）") if extra else ""
+
+            def _rec(seat):
+                p = players.get(seat) or {}
+                s = stats.get(str(seat)) or {}
+                n = p.get("name") or p.get("qq")
+                return f"{n}：{s.get('win', 0)}胜{s.get('lose', 0)}负"
+
+            msg = (
+                f"🃏 斗地主对战结束\n"
+                f"{head}{extra_txt}\n"
+                f"{money}\n"
+                f"📊 {_rec(1)} · {_rec(2)} · {_rec(3)}"
+            )
+            await self._bot_send_group(bot, gid, msg)
+        except Exception as e:
+            logger.error(f"[newapi] 斗地主播报异常: {e}")
 
     async def _game_api(self, base: str, method: str, path: str, body: dict = None):
         """调用游戏服务 HTTP API，返回 (ok, data)。HTTP 4xx/5xx 视为失败，方便上抛业务错误。"""
@@ -2127,7 +2247,7 @@ class NewAPIPlugin(Star):
             self._hall_tasks[gid] = asyncio.create_task(self._hall_poll(base, gid, event.bot))
         yield event.plain_result(
             f"🎮 游戏大厅\n{link}\n\n"
-            f"联机对战（象棋 / 五子棋）：群里发 %象棋对战 / %五子棋对战 匹配，"
+            f"联机对战（斗地主 / 象棋 / 五子棋）：群里发 %斗地主 / %象棋对战 / %五子棋对战 匹配，"
             f"匹配成功后机器人会私聊房间码，进大厅输入房间码即可进入对局"
         )
 
@@ -2942,12 +3062,13 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
             "/排行榜（/排行）[llm|调用|消耗] - 使用排行榜（模型热度/调用次数/额度消耗，渲染成图片）\n"
             "/猜大小 <大|小> <金额> - 猜三骰点数和（1:1，真实额度，需开启游戏）\n"
             "/猜点数 <1~6> <金额> - 猜单骰点数（高赔率，真实额度，需开启游戏）\n"
-            "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(老虎机/21点/24点)、模拟股市、象棋/五子棋网页对战（NewAPI 登录，需开启对战平台）\n"
+            "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(贪吃蛇/打砖块/24点)、模拟股市、斗地主/象棋/五子棋网页对战（NewAPI 登录，需开启对战平台）\n"
             "/股票（/股市）- 群发模拟股市行情页链接（看行情、买卖股票，NewAPI 登录）\n"
             "/持仓（/我的持仓）- 查询自己绑定账号在模拟股市的持仓与盈亏\n"
             "/行情（/大盘）- 大盘指数 + 涨跌家数 + 各股现价涨跌一览\n"
             "/股票排行（/市值排行）- 按持仓市值排名的股市排行榜\n"
             "/股票帮助 - 模拟股市命令列表\n"
+            "/斗地主 [底注美元] - 三人一桌斗地主，匹配满 3 人后私聊发送房间码（真实额度）\n"
             "/象棋对战 [押注美元] - 发起象棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
             "/五子棋对战 [押注美元] - 发起五子棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
             "/取消绑定 - 取消进行中的 ID 绑定\n"
@@ -3013,10 +3134,15 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                         yield r
                     event.stop_event()
                     return
-                # 对战指令：押注可选（%象棋对战 [押注美元] / %五子棋对战 [押注美元]）
-                if cmd in ("象棋对战", "象棋", "下象棋", "五子棋对战", "五子棋", "下五子棋"):
+                # 对战指令：押注可选（%斗地主 [底注美元] / %象棋对战 [押注美元] / %五子棋对战 [押注美元]）
+                if cmd in ("斗地主", "斗地主对战", "三人斗地主", "象棋对战", "象棋", "下象棋", "五子棋对战", "五子棋", "下五子棋"):
                     bet = args[0] if args else ""
-                    gt = "xiangqi" if cmd in ("象棋对战", "象棋", "下象棋") else "gomoku"
+                    if cmd in ("斗地主", "斗地主对战", "三人斗地主"):
+                        gt = "doudizhu"
+                    elif cmd in ("象棋对战", "象棋", "下象棋"):
+                        gt = "xiangqi"
+                    else:
+                        gt = "gomoku"
                     async for r in self._battle_impl(event, gt, bet):
                         yield r
                     event.stop_event()
