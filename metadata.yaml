@@ -2,6 +2,6 @@ name: astrbot_plugin_newapi_helper
 display_name: NewAPI 助手
 desc: 在 QQ 群绑定 NewAPI 账号，支持每日签到、余额查询、账号绑定/解绑、退群自动删号、猜大小/猜点数额度小游戏、象棋/五子棋网页对战、游戏大厅（单机小游戏+模拟股市+NewAPI登录）、/股票 行情页快捷入口、/持仓 查询持仓盈亏、/行情 大盘概览、/股票排行 排行榜、/股票帮助 命令列表
 help: 发送 /newapi帮助 查看命令
-version: 0.0.34
+version: 0.0.35
 author: Shawlei
 repo: https://github.com/Shawlei/astrbot_plugin_newapi_helper
