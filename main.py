@@ -1684,7 +1684,7 @@ class NewAPIPlugin(Star):
             return
         if not self._group_allowed(event):
             return
-        """象棋对战：%象棋对战 [押注美元]，匹配到对手后私聊发送对战链接，真实额度结算"""
+        """象棋对战：%象棋对战 [押注美元]，匹配到对手后私聊发送房间码，凭码进入对战，真实额度结算"""
         async for r in self._battle_impl(event, "xiangqi", bet):
             yield r
 
@@ -1694,7 +1694,7 @@ class NewAPIPlugin(Star):
             return
         if not self._group_allowed(event):
             return
-        """五子棋对战：%五子棋对战 [押注美元]，匹配到对手后私聊发送对战链接，真实额度结算"""
+        """五子棋对战：%五子棋对战 [押注美元]，匹配到对手后私聊发送房间码，凭码进入对战，真实额度结算"""
         async for r in self._battle_impl(event, "gomoku", bet):
             yield r
 
@@ -1932,7 +1932,8 @@ class NewAPIPlugin(Star):
 
     async def _battle_impl(self, event: AstrMessageEvent, game_type: str, bet: str = ""):
         names = {"xiangqi": "中国象棋", "gomoku": "五子棋"}
-        urls = {"xiangqi": "xiangqi.html", "gomoku": "gomoku.html"}
+        sides1 = {"xiangqi": "红方（先手）", "gomoku": "黑方（先手）"}
+        sides2 = {"xiangqi": "黑方", "gomoku": "白方"}
         cmds = {"xiangqi": "象棋对战", "gomoku": "五子棋对战"}
 
         if not self._is_group(event):
@@ -1978,7 +1979,7 @@ class NewAPIPlugin(Star):
         if data.get("code") == "created":
             yield event.plain_result(
                 f"🎮 {names[game_type]}对战(1/2)，押注 ${final_bet:g}，等待对手加入\n"
-                f"对手发送 %{cmds[game_type]} 即可匹配开战"
+                f"对手发送 %{cmds[game_type]} 即可匹配，匹配成功后双方会收到房间码"
             )
             return
 
@@ -2001,25 +2002,31 @@ class NewAPIPlugin(Star):
             return
 
         jroom = jd.get("room") or {}
-        tokens = jroom.get("tokens") or {}
+        code = (jroom.get("code") or "").strip()
         r1 = (jroom.get("players") or {}).get("1") or {}
         r2 = (jroom.get("players") or {}).get("2") or {}
-        link1 = f"{base}/{urls[game_type]}?room={rid}&player=1&token={tokens.get('1', '')}"
-        link2 = f"{base}/{urls[game_type]}?room={rid}&player=2&token={tokens.get('2', '')}"
+        if not code:
+            yield event.plain_result("生成房间码失败，请稍后再试")
+            return
+        entry = "请到游戏大厅选择对应游戏（或直接打开游戏页），输入房间码进入对战"
 
         await self._send_private(
             event, str(r1.get("qq")),
-            f"⚔️ {names[game_type]}对战匹配成功！\n对手：{r2.get('name')}\n押注：${final_bet:g}\n点击开战：{link1}",
+            f"⚔️ {names[game_type]}对战匹配成功！\n"
+            f"对手：{r2.get('name')}\n押注：${final_bet:g}\n"
+            f"房间码：{code}\n你是{sides1[game_type]}\n{entry}",
         )
         await self._send_private(
             event, str(r2.get("qq")),
-            f"⚔️ {names[game_type]}对战匹配成功！\n对手：{r1.get('name')}\n押注：${final_bet:g}\n点击开战：{link2}",
+            f"⚔️ {names[game_type]}对战匹配成功！\n"
+            f"对手：{r1.get('name')}\n押注：${final_bet:g}\n"
+            f"房间码：{code}\n你是{sides2[game_type]}\n{entry}",
         )
 
         yield event.plain_result(
             f"⚔️ {names[game_type]}对战匹配成功！\n"
             f"{r1.get('name')} vs {r2.get('name')}，押注 ${final_bet:g}\n"
-            f"对战链接已私聊发送，双方点击进入即可开战"
+            f"房间码已私聊发送，双方凭房间码进入对战"
         )
 
         # 后台轮询对局结果，结束后回群播报
@@ -2120,7 +2127,8 @@ class NewAPIPlugin(Star):
             self._hall_tasks[gid] = asyncio.create_task(self._hall_poll(base, gid, event.bot))
         yield event.plain_result(
             f"🎮 游戏大厅\n{link}\n\n"
-            f"进大厅选游戏（象棋 / 五子棋），在游戏页点「邀请群友对战」即可发起对局"
+            f"联机对战（象棋 / 五子棋）：群里发 %象棋对战 / %五子棋对战 匹配，"
+            f"匹配成功后机器人会私聊房间码，进大厅输入房间码即可进入对局"
         )
 
     async def _hall_poll(self, base: str, gid: str, bot):
@@ -2940,8 +2948,8 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
             "/行情（/大盘）- 大盘指数 + 涨跌家数 + 各股现价涨跌一览\n"
             "/股票排行（/市值排行）- 按持仓市值排名的股市排行榜\n"
             "/股票帮助 - 模拟股市命令列表\n"
-            "/象棋对战 [押注美元] - 发起象棋对战，匹配到对手后私聊发送网页链接（真实额度）\n"
-            "/五子棋对战 [押注美元] - 发起五子棋对战，匹配到对手后私聊发送网页链接（真实额度）\n"
+            "/象棋对战 [押注美元] - 发起象棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
+            "/五子棋对战 [押注美元] - 发起五子棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
             "/取消绑定 - 取消进行中的 ID 绑定\n"
             "/帮助 - 本命令列表\n"
             "管理员：/查用户 <用户名/数字ID/QQ号/@某人>、/强制解绑 <QQ号>\n"
