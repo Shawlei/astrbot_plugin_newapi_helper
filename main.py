@@ -398,20 +398,20 @@ class MySQLQuota:
 
     # ---- 排行榜 ----
     async def top_models(self, limit: int = 10):
-        """LLM 模型热度榜：统计各模型调用次数与消耗额度（logs 表，type=1 为消耗记录）"""
+        """模型调用排行榜（模型维度）：统计各模型调用次数与消耗额度（logs 表，type=1 为消耗记录）"""
         sql = ("SELECT model_name, COUNT(*) AS cnt, COALESCE(SUM(quota), 0) AS total_quota "
                "FROM logs WHERE type=1 AND model_name IS NOT NULL AND model_name <> '' "
                "GROUP BY model_name ORDER BY cnt DESC, total_quota DESC LIMIT %s")
         return await self.query_all(sql, (int(limit),)) or []
 
     async def top_by_calls(self, limit: int = 10):
-        """调用次数榜：按 users.request_count 排序"""
+        """调用次数排行榜（用户维度）：按 users.request_count 排序"""
         sql = ("SELECT id, username, display_name, request_count FROM users "
                "WHERE deleted_at IS NULL ORDER BY request_count DESC LIMIT %s")
         return await self.query_all(sql, (int(limit),)) or []
 
     async def top_by_quota(self, limit: int = 10):
-        """额度消耗榜：按 users.used_quota 排序"""
+        """额度排行榜（用户维度）：按 users.used_quota 排序"""
         sql = ("SELECT id, username, display_name, used_quota FROM users "
                "WHERE deleted_at IS NULL ORDER BY used_quota DESC LIMIT %s")
         return await self.query_all(sql, (int(limit),)) or []
@@ -2852,7 +2852,7 @@ class NewAPIPlugin(Star):
             return
         if not self._group_allowed(event):
             return
-        """使用排行榜：/排行榜 [llm|调用|消耗]，不填=全部三个榜单（渲染成图片）"""
+        """使用排行榜：/排行榜 默认=额度榜；/排行榜 模型|llm=模型调用榜；/排行榜 调用；/排行榜 全部（渲染成图片）"""
         async for r in self._rank_impl(event, which):
             yield r
 
@@ -2867,17 +2867,19 @@ class NewAPIPlugin(Star):
         top_n = int(self._cfg("rank_top_n", 10) or 10)
 
         which = (which or "").strip().lower()
+        # 命令语义：默认 /排行榜 = 额度排行榜（按用户消耗额度）；/排行榜 模型|llm = 模型调用排行榜（按模型）；
+        # /排行榜 调用 = 调用次数排行榜（按用户调用次数）；/排行榜 全部 = 三个榜同屏。
         show = {"llm": False, "calls": False, "quota": False}
-        if which in ("", "all", "全部", "all"):
-            show = {"llm": True, "calls": True, "quota": True}
-        elif which in ("llm", "模型", "模型榜"):
-            show["llm"] = True
-        elif which in ("调用", "次数", "调用榜"):
-            show["calls"] = True
-        elif which in ("消耗", "额度", "消耗榜", "quota"):
+        if which in ("", "额度", "消耗", "余额", "quota", "额度榜", "消耗榜"):
             show["quota"] = True
+        elif which in ("模型", "llm", "model", "模型榜", "模型调用", "模型调用榜", "模型热度"):
+            show["llm"] = True
+        elif which in ("调用", "次数", "调用榜", "次数榜"):
+            show["calls"] = True
+        elif which in ("all", "全部", "全部榜", "总榜"):
+            show = {"llm": True, "calls": True, "quota": True}
         else:
-            yield event.plain_result("用法：/排行榜 [llm|调用|消耗]（不填 = 全部三个榜单）")
+            yield event.plain_result("用法：/排行榜（默认=额度榜）｜/排行榜 额度｜/排行榜 模型（或 llm）｜/排行榜 调用｜/排行榜 全部")
             return
 
         per = int(self._cfg("quota_per_unit", 500000) or 500000)
@@ -2951,7 +2953,7 @@ class NewAPIPlugin(Star):
                     '<div class="name">' + name + '</div>'
                     '<div class="val">' + str(cnt) + ' 次 · $' + usd + '</div></div>'
                 )
-            sections.append('<div class="section"><div class="stitle">🧠 LLM 模型热度榜</div>'
+            sections.append('<div class="section"><div class="stitle">🧠 模型调用排行榜</div>'
                              + "".join(rows) + '</div>')
 
         if calls:
@@ -2964,7 +2966,7 @@ class NewAPIPlugin(Star):
                     '<div class="name">' + name + '</div>'
                     '<div class="val">' + str(cnt) + ' 次</div></div>'
                 )
-            sections.append('<div class="section"><div class="stitle">📞 调用次数榜</div>'
+            sections.append('<div class="section"><div class="stitle">📞 调用次数排行榜</div>'
                              + "".join(rows) + '</div>')
 
         if quota:
@@ -2977,11 +2979,20 @@ class NewAPIPlugin(Star):
                     '<div class="name">' + name + '</div>'
                     '<div class="val">$' + usd + '</div></div>'
                 )
-            sections.append('<div class="section"><div class="stitle">💰 额度消耗榜</div>'
+            sections.append('<div class="section"><div class="stitle">💰 额度排行榜</div>'
                              + "".join(rows) + '</div>')
 
         body = "".join(sections)
         width, height, section_count = self._rank_render_size(models, calls, quota)
+        # 副标题根据实际展示的榜单动态生成，避免「只显示额度榜」时副标题仍写三个榜
+        sub_parts = []
+        if models:
+            sub_parts.append("模型调用")
+        if calls:
+            sub_parts.append("调用次数")
+        if quota:
+            sub_parts.append("额度消耗")
+        sub_text = " · ".join(sub_parts) if sub_parts else "暂无数据"
 
         css = '''<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
@@ -3008,7 +3019,7 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
 .val { flex:0 0 auto; font-size:12px; font-weight:700; color:#5b5fd7; white-space:nowrap; }
 .footer { text-align:center; font-size:11px; color:#a4a8b4; padding-top:12px; }
 </style></head><body><div class="wrap">
-<div class="header"><div class="title">📊 NewAPI 使用排行榜</div><div class="sub">LLM 模型热度 · 调用次数 · 额度消耗</div></div><div class="grid">'''
+<div class="header"><div class="title">📊 NewAPI 使用排行榜</div><div class="sub">''' + sub_text + '''</div></div><div class="grid">'''
 
         tail = '</div><div class="footer">数据来自站点数据库 · 统计前 ' + str(top_n) + ' 名</div></div></body></html>'
         return css + body + tail
@@ -3018,19 +3029,19 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
         lines = ["📊 NewAPI 使用排行榜"]
         if models:
             lines.append("")
-            lines.append("🧠 LLM 模型热度榜")
+            lines.append("🧠 模型调用排行榜")
             for i, m in enumerate(models, 1):
                 usd = NewAPIPlugin._fmt_usd_int(m.get("total_quota"), per)
                 lines.append(f"{i}. {m.get('model_name')} — {int(m.get('cnt') or 0)} 次 / ${usd}")
         if calls:
             lines.append("")
-            lines.append("📞 调用次数榜")
+            lines.append("📞 调用次数排行榜")
             for i, u in enumerate(calls, 1):
                 name = u.get("display_name") or u.get("username") or "?"
                 lines.append(f"{i}. {name} — {int(u.get('request_count') or 0)} 次")
         if quota:
             lines.append("")
-            lines.append("💰 额度消耗榜")
+            lines.append("💰 额度排行榜")
             for i, u in enumerate(quota, 1):
                 name = u.get("display_name") or u.get("username") or "?"
                 usd = NewAPIPlugin._fmt_usd_int(u.get("used_quota"), per)
@@ -3059,7 +3070,7 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
             "/发红包 <个数> <总金额> - 发拼手气红包（真实扣款）\n"
             "/抢红包 - 抢群内红包（真实入账）\n"
             "/抢劫 @某人 - 抢劫群友余额（真实扣款/入账，需开启抢劫玩法）\n"
-            "/排行榜（/排行）[llm|调用|消耗] - 使用排行榜（模型热度/调用次数/额度消耗，渲染成图片）\n"
+            "/排行榜（/排行）[额度|模型|llm|调用|全部] - 额度榜(默认)/模型调用榜/调用次数榜（渲染成图片）\n"
             "/猜大小 <大|小> <金额> - 猜三骰点数和（1:1，真实额度，需开启游戏）\n"
             "/猜点数 <1~6> <金额> - 猜单骰点数（高赔率，真实额度，需开启游戏）\n"
             "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(贪吃蛇/打砖块/24点)、模拟股市、斗地主/象棋/五子棋网页对战（NewAPI 登录，需开启对战平台）\n"
@@ -3147,6 +3158,13 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                         yield r
                     event.stop_event()
                     return
+                # 排行榜（which 为可选参数，单独处理以透传「额度/模型/调用/全部」）
+                if cmd in ("排行榜", "排行", "榜单"):
+                    which = args[0] if args else ""
+                    async for r in self._rank_impl(event, which):
+                        yield r
+                    event.stop_event()
+                    return
                 handlers = {
                     "注册": (self._register_impl, 0),
                     "找回密码": (self._get_password_impl, 0),
@@ -3161,7 +3179,6 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                     "抢劫": (self._rob_impl, 1),
                     "查用户": (self._admin_search_impl, 1),
                     "强制解绑": (self._admin_unbind_impl, 1),
-                    "排行榜": (self._rank_impl, 0),
                     "猜大小": (self._guess_size_impl, 2),
                     "猜点数": (self._guess_point_impl, 2),
                     "帮助": (self._help_impl, 0),
