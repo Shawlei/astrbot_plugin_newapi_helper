@@ -18,6 +18,11 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
+try:
+    import astrbot.api.message_components as Comp
+except Exception:  # 平台无该模块时降级
+    Comp = None
+
 
 def _xor_bytes(data: bytes, key: bytes) -> bytes:
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
@@ -1312,10 +1317,15 @@ class NewAPIPlugin(Star):
 
         target["claimed"][qq] = share
         await self.hongbao.update(target_pid, target)
-        reply = f"🧧 抢到 {self._fmt_quota(share)}！"
-        if not target["shares"]:
-            reply += f"\n红包已被抢完啦～（共 {target['count']} 个）"
-        yield event.plain_result(reply)
+        tip = f"\n红包已被抢完啦～（共 {target['count']} 个）" if not target["shares"] else ""
+        text = f"🧧 抢到 {self._fmt_quota(share)}！{tip}"
+        if Comp is not None:
+            try:
+                yield event.chain_result([Comp.At(qq=qq), Comp.Plain(text=text)])
+                return
+            except Exception:
+                pass
+        yield event.plain_result(text)
 
     # ---------- 抢劫玩法 ----------
     @filter.command("抢劫", alias={"打劫", "抢钱"})
