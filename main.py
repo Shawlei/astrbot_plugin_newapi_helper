@@ -1501,15 +1501,15 @@ class NewAPIPlugin(Star):
                 f"😅 抢劫失败！{aname} 被 {tname} 反杀，赔偿 {self._fmt_quota(penalty)}"
             )
 
-    # ---------- 猜大小 / 猜点数（额度小游戏） ----------
+    # ---------- 猜大小 / 猜点数（额度小游戏，已迁移到网页） ----------
     @filter.command("猜大小", alias={"大小", "比大小"})
     async def guess_size(self, event: AstrMessageEvent, choice: str = "", amount: str = ""):
         if not self._cfg("slash_enabled", True):
             return
         if not self._group_allowed(event):
             return
-        """猜大小：/猜大小 <大|小> <金额>，三骰点数和 3~10 为小、11~18 为大，1:1 真实结算"""
-        async for r in self._guess_size_impl(event, choice, amount):
+        """猜大小：网页版（/猜大小 跳转骰子游戏页，猜大小/猜点数已迁移到网页，服务端权威开奖）"""
+        async for r in self._dice_impl(event):
             yield r
 
     @filter.command("猜点数", alias={"点数", "猜骰子"})
@@ -1518,9 +1518,25 @@ class NewAPIPlugin(Star):
             return
         if not self._group_allowed(event):
             return
-        """猜点数：/猜点数 <1~6> <金额>，猜单骰点数，高赔率真实结算"""
-        async for r in self._guess_point_impl(event, point, amount):
+        """猜点数：网页版（/猜点数 跳转骰子游戏页）"""
+        async for r in self._dice_impl(event):
             yield r
+
+    async def _dice_impl(self, event: AstrMessageEvent):
+        """猜大小网页版：返回骰子游戏页链接（猜大小/猜点数已迁移到网页，服务端权威开奖结算）"""
+        if not self._is_group(event):
+            yield event.plain_result("请在群聊中使用猜大小")
+            return
+        base = (self._cfg("game_server_url", "") or "").strip().rstrip("/")
+        if not base:
+            yield event.plain_result("游戏服务未配置：请在插件配置的「对战平台设置」里填写游戏服务地址")
+            return
+        link = f"{base}/dice.html"
+        yield event.plain_result(
+            f"🎲 猜大小（网页版）\n{link}\n\n"
+            f"点链接登录 NewAPI 账号即可猜大小（1:1）/ 猜点数（高赔率），"
+            f"结果由服务端生成、真实额度结算"
+        )
 
     async def _guess_size_impl(self, event: AstrMessageEvent, choice: str = "", amount: str = ""):
         async for r in self._game_impl(event, "size", choice, amount):
@@ -3071,9 +3087,8 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
             "/抢红包 - 抢群内红包（真实入账）\n"
             "/抢劫 @某人 - 抢劫群友余额（真实扣款/入账，需开启抢劫玩法）\n"
             "/排行榜（/排行）[额度|模型|llm|调用|全部] - 额度榜(默认)/模型调用榜/调用次数榜（渲染成图片）\n"
-            "/猜大小 <大|小> <金额> - 猜三骰点数和（1:1，真实额度，需开启游戏）\n"
-            "/猜点数 <1~6> <金额> - 猜单骰点数（高赔率，真实额度，需开启游戏）\n"
-            "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(贪吃蛇/打砖块/24点)、模拟股市、斗地主/象棋/五子棋网页对战（NewAPI 登录，需开启对战平台）\n"
+            "/猜大小（/猜点数）- 猜大小网页版：三骰猜大小(1:1)/猜单骰点数(高赔率)，服务端开奖真实结算\n"
+            "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(贪吃蛇/打砖块/24点/猜大小)、模拟股市、斗地主/象棋/五子棋网页对战（NewAPI 登录，需开启对战平台）\n"
             "/股票（/股市）- 群发模拟股市行情页链接（看行情、买卖股票，NewAPI 登录）\n"
             "/持仓（/我的持仓）- 查询自己绑定账号在模拟股市的持仓与盈亏\n"
             "/行情（/大盘）- 大盘指数 + 涨跌家数 + 各股现价涨跌一览\n"
@@ -3165,6 +3180,12 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                         yield r
                     event.stop_event()
                     return
+                # 猜大小 / 猜点数：已迁移到网页，跳转骰子游戏页
+                if cmd in ("猜大小", "大小", "比大小", "猜点数", "点数", "猜骰子"):
+                    async for r in self._dice_impl(event):
+                        yield r
+                    event.stop_event()
+                    return
                 handlers = {
                     "注册": (self._register_impl, 0),
                     "找回密码": (self._get_password_impl, 0),
@@ -3179,8 +3200,6 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                     "抢劫": (self._rob_impl, 1),
                     "查用户": (self._admin_search_impl, 1),
                     "强制解绑": (self._admin_unbind_impl, 1),
-                    "猜大小": (self._guess_size_impl, 2),
-                    "猜点数": (self._guess_point_impl, 2),
                     "帮助": (self._help_impl, 0),
                 }
                 if cmd not in handlers:
