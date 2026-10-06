@@ -468,6 +468,31 @@ class HongbaoStore:
         async with self.lock:
             return dict(self.data["packets"])
 
+    async def grab(self, pid: str, qq: str) -> Optional[int]:
+        """原子抢包：检查是否已抢 + pop 一个份额 + 标记 claimed + 持久化。
+
+        返回抢到的份额（int）；若红包不存在 / 该用户已抢过 / 无剩余份额则返回 None。
+        读-改-写全程持锁，防止并发重复抢。
+        """
+        async with self.lock:
+            p = self.data["packets"].get(pid)
+            if not p or not p.get("shares") or qq in p.get("claimed", {}):
+                return None
+            share = p["shares"].pop(random.randrange(len(p["shares"])))
+            p["claimed"][qq] = share
+            self._save_sync()
+            return share
+
+    async def rollback(self, pid: str, qq: str, share: int):
+        """入账失败回滚：把份额放回 shares 并移除 claimed 标记（原子）。"""
+        async with self.lock:
+            p = self.data["packets"].get(pid)
+            if not p:
+                return
+            p["shares"].append(share)
+            p["claimed"].pop(qq, None)
+            self._save_sync()
+
 
 def split_red_packet(total: int, n: int) -> list:
     """二倍均值法拼手气拆分（与微信/QQ一致），每个包至少 1 raw quota"""
@@ -1306,18 +1331,23 @@ class NewAPIPlugin(Star):
             yield event.plain_result("手慢了，没有可以抢的红包（或你已抢过本群红包）")
             return
 
-        share = target["shares"].pop(random.randrange(len(target["shares"])))
-        # 真实入账；失败则把份额放回
+        # 原子抢包：检查已抢 + pop + 标记 claimed 在 store 锁内完成，防止并发重复抢
+        share = await self.hongbao.grab(target_pid, qq)
+        if share is None:
+            # 并发下可能刚被抢光，或已抢过本群红包
+            yield event.plain_result("手慢了，没有可以抢的红包（或你已抢过本群红包）")
+            return
+
+        # 真实入账；失败则回滚份额
         ok = await self.dbq.adjust(int(rec["user_id"]), share)
         if not ok:
-            target["shares"].append(share)
-            await self.hongbao.update(target_pid, target)
+            await self.hongbao.rollback(target_pid, qq, share)
             yield event.plain_result("抢红包失败：入账异常，红包份额已保留，请稍后再试")
             return
 
-        target["claimed"][qq] = share
-        await self.hongbao.update(target_pid, target)
-        tip = f"\n红包已被抢完啦～（共 {target['count']} 个）" if not target["shares"] else ""
+        pkt = await self.hongbao.get(target_pid)
+        total = (pkt or {}).get("count", 0)
+        tip = f"\n红包已被抢完啦～（共 {total} 个）" if not (pkt or {}).get("shares") else ""
         text = f"🧧 抢到 {self._fmt_quota(share)}！{tip}"
         if Comp is not None:
             try:
