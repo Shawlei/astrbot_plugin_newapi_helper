@@ -3294,6 +3294,16 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
         async for r in self._help_impl(event):
             yield r
 
+    @filter.command("游戏帮助", alias={"游戏菜单", "小游戏帮助", "游戏help", "游戏命令"})
+    async def game_help(self, event: AstrMessageEvent):
+        if not self._cfg("slash_enabled", True):
+            return
+        if not self._group_allowed(event):
+            return
+        """游戏中心命令帮助：列出所有游戏相关命令"""
+        async for r in self._game_help_impl(event):
+            yield r
+
     async def _help_impl(self, event: AstrMessageEvent):
         yield event.plain_result(
             "📖 NewAPI 插件命令：\n"
@@ -3307,21 +3317,29 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
             "/发红包 <个数> <总金额> - 发拼手气红包（真实扣款）\n"
             "/抢红包 - 抢群内红包（真实入账）\n"
             "/抢劫 @某人 - 抢劫群友余额（真实扣款/入账，需开启抢劫玩法）\n"
+            "/转账 @某人 <金额> - 转额度给群友（真实扣款入账）\n"
             "/排行榜（/排行）[额度|模型|llm|调用|全部] - 额度榜(默认)/模型调用榜/调用次数榜（渲染成图片）\n"
-            "/猜大小（/猜点数）- 猜大小网页版：三骰猜大小(1:1)/猜单骰点数(高赔率)，服务端开奖真实结算\n"
-            "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(贪吃蛇/打砖块/24点/猜大小)、模拟股市、斗地主/象棋/五子棋网页对战（NewAPI 登录，需开启对战平台）\n"
+            "/取消绑定 - 取消进行中的 ID 绑定\n"
+            "/游戏帮助（/游戏菜单）- 所有小游戏/模拟股市/网页对战命令列表\n"
+            "/帮助 - 本命令列表\n"
+            "管理员：/查用户 <用户名/数字ID/QQ号/@某人>、/强制解绑 <QQ号>\n"
+            "自定义前缀（如已配置 %）：%签到、%注册、%找回密码、%转账、%游戏帮助 等价于对应命令"
+        )
+
+    async def _game_help_impl(self, event: AstrMessageEvent):
+        yield event.plain_result(
+            "🎮 游戏中心命令：\n"
+            "/猜大小（/猜点数）- 三骰猜大小(1:1)/猜单骰点数(高赔率)，服务端开奖真实结算\n"
+            "/游戏大厅（/大厅）- 群发游戏大厅链接：单机小游戏(贪吃蛇/打砖块/24点/猜大小/合成大西瓜)、模拟股市、斗地主/象棋/五子棋网页对战（NewAPI 登录）\n"
+            "/斗地主 [底注美元] - 三人一桌斗地主，匹配满 3 人后私聊发送房间码（真实额度）\n"
+            "/象棋对战 [押注美元] - 发起象棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
+            "/五子棋对战 [押注美元] - 发起五子棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
             "/股票（/股市）- 群发模拟股市行情页链接（看行情、买卖股票，NewAPI 登录）\n"
             "/持仓（/我的持仓）- 查询自己绑定账号在模拟股市的持仓与盈亏\n"
             "/行情（/大盘）- 大盘指数 + 涨跌家数 + 各股现价涨跌一览\n"
             "/股票排行（/市值排行）- 按持仓市值排名的股市排行榜\n"
-            "/股票帮助 - 模拟股市命令列表\n"
-            "/斗地主 [底注美元] - 三人一桌斗地主，匹配满 3 人后私聊发送房间码（真实额度）\n"
-            "/象棋对战 [押注美元] - 发起象棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
-            "/五子棋对战 [押注美元] - 发起五子棋对战，匹配到对手后私聊发送房间码（真实额度）\n"
-            "/取消绑定 - 取消进行中的 ID 绑定\n"
-            "/帮助 - 本命令列表\n"
-            "管理员：/查用户 <用户名/数字ID/QQ号/@某人>、/强制解绑 <QQ号>\n"
-            "自定义前缀（如已配置 %）：%签到、%注册、%找回密码、%查用户 等价于对应命令"
+            "/股票帮助 - 模拟股市详细命令与交易规则\n"
+            "/游戏帮助 - 本命令列表"
         )
 
     # ---------- 自定义指令前缀（绕过 LLM） ----------
@@ -3366,6 +3384,12 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                 # 股票帮助
                 if cmd in ("股票帮助", "股票help", "股市帮助", "股票菜单", "股票命令", "股市命令"):
                     async for r in self._stock_help_impl(event):
+                        yield r
+                    event.stop_event()
+                    return
+                # 游戏帮助（所有游戏/股市/对战命令汇总）
+                if cmd in ("游戏帮助", "游戏菜单", "小游戏帮助", "游戏help", "游戏命令"):
+                    async for r in self._game_help_impl(event):
                         yield r
                     event.stop_event()
                     return
@@ -3419,6 +3443,7 @@ body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; bac
                     "发红包": (self._send_hongbao_impl, 2),
                     "抢红包": (self._grab_hongbao_impl, 0),
                     "抢劫": (self._rob_impl, 1),
+                    "转账": (self._transfer_impl, 2),
                     "查用户": (self._admin_search_impl, 1),
                     "强制解绑": (self._admin_unbind_impl, 1),
                     "帮助": (self._help_impl, 0),
