@@ -401,6 +401,51 @@ class MySQLQuota:
             logger.error(f"[newapi] 数据库额度操作失败: {e}")
             return False
 
+    async def transfer(self, from_id: int, to_id: int, amount: int) -> bool:
+        """真实转账：同一事务内「先扣 from 后加 to」，余额不足或任一步失败整体回滚。
+        返回 True 表示转账成功；False 表示失败（余额不足 / 账号不存在 / 事务异常）。
+        注意：pool.acquire() 的连接会复用，必须在 finally 中恢复 autocommit，否则影响后续写入。"""
+        if self.pool is None or amount <= 0 or from_id == to_id:
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.autocommit(False)
+                ok = False
+                try:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "UPDATE users SET quota = quota - %s "
+                            "WHERE id = %s AND quota >= %s AND deleted_at IS NULL",
+                            (amount, from_id, amount),
+                        )
+                        if cur.rowcount != 1:
+                            raise RuntimeError("deduct-failed")
+                        await cur.execute(
+                            "UPDATE users SET quota = quota + %s "
+                            "WHERE id = %s AND deleted_at IS NULL",
+                            (amount, to_id),
+                        )
+                        if cur.rowcount != 1:
+                            raise RuntimeError("credit-failed")
+                    await conn.commit()
+                    ok = True
+                except Exception as e:
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        pass
+                    if not isinstance(e, RuntimeError):
+                        logger.error(f"[newapi] 转账事务失败: {e}")
+                finally:
+                    try:
+                        await conn.autocommit(True)
+                    except Exception:
+                        pass
+                return ok
+        except Exception as e:
+            logger.error(f"[newapi] 数据库转账失败: {e}")
+            return False
+
     # ---- 排行榜 ----
     async def top_models(self, limit: int = 10):
         """模型调用排行榜（模型维度）：统计各模型调用次数与消耗额度（logs 表，type=1 为消耗记录）"""
@@ -1540,6 +1585,142 @@ class NewAPIPlugin(Star):
             yield event.plain_result(
                 f"😅 抢劫失败！{aname} 被 {tname} 反杀，赔偿 {self._fmt_quota(penalty)}"
             )
+
+    # ---------- 转账 ----------
+    @filter.command("转账", alias={"转帐", "transfer", "汇款"})
+    async def transfer(self, event: AstrMessageEvent, target: str = "", amount: str = ""):
+        if not self._cfg("slash_enabled", True):
+            return
+        if not self._group_allowed(event):
+            return
+        """转账给群友：/转账 @某人 <金额>（按美元额度计，真实扣款入账）"""
+        async for r in self._transfer_impl(event, target, amount):
+            yield r
+
+    async def _transfer_target(self, event: AstrMessageEvent, arg):
+        """解析转账目标 QQ：优先 @，其次纯数字 QQ 号，再次 NewAPI 用户名；返回 (qq, errmsg)"""
+        sender = str(event.get_sender_id()).strip()
+        try:
+            self_id = str(event.get_self_id())
+        except Exception:
+            self_id = None
+        # 1) @ 提及（排除发送者自己与机器人自身）
+        for q in _extract_at_qqs(event):
+            if q != sender and q != self_id:
+                return q, None
+        # 2) 参数可能是 At 段对象，统一转字符串
+        if isinstance(arg, str):
+            arg = arg.strip()
+        else:
+            arg = ""
+        # 3) 纯数字 → QQ 号
+        if arg.isdigit():
+            if arg == sender:
+                return None, "不能转账给自己"
+            return arg, None
+        # 4) 用户名 → 反查绑定 QQ
+        if arg:
+            db = await self._db()
+            if db is not None:
+                users = await db.search_users(arg, limit=10)
+                matched = [u for u in users
+                           if str(u.get("username", "")).lower() == arg.lower()]
+                if len(matched) == 1:
+                    qq = await self.store.find_by_user_id(matched[0].get("id"))
+                    if qq and qq != sender:
+                        return qq, None
+                    return None, f"用户 {arg} 尚未绑定 QQ，无法作为转账目标"
+                return None, f"未找到用户名 {arg}（或存在多个匹配）"
+            return None, "当前为 API 模式，无法按用户名定位目标，请用 @ 或 QQ 号"
+        return None, "请指定转账目标：/转账 @某人 <金额>"
+
+    async def _transfer_impl(self, event: AstrMessageEvent, target: str = "", amount: str = ""):
+        if not self._cfg("db.transfer_enabled", False):
+            yield event.plain_result("转账功能未开启（需在数据库模式下打开「💸 转账」开关）")
+            return
+        if not self._is_group(event):
+            yield event.plain_result("请在群聊中使用转账")
+            return
+
+        # 解析金额：优先 amount 参数；amount 为空且 target 是纯数字时兜底（@ 目标已由 _transfer_target 解析）
+        import re as _re
+        amount_txt = amount if isinstance(amount, str) else ""
+        am = _re.findall(r"\d+(?:\.\d+)?", amount_txt)
+        if not am and isinstance(target, str) and target.strip().isdigit():
+            am = [target.strip()]
+        if not am:
+            yield event.plain_result("用法：/转账 @某人 <金额>\n例如：/转账 @小明 100（转 100 美元额度）")
+            return
+        amount_usd = float(am[0])
+        if amount_usd <= 0:
+            yield event.plain_result("转账金额必须大于 0")
+            return
+
+        qq = str(event.get_sender_id()).strip()
+        rec = await self.store.get(qq)
+        if not rec:
+            yield event.plain_result("转账前请先绑定 NewAPI 账号（/密码绑定 或 /绑定 <ID>）")
+            return
+
+        t_qq, err = await self._transfer_target(event, target)
+        if err:
+            yield event.plain_result(err)
+            return
+
+        db = await self._db()
+        if db is None:
+            yield event.plain_result("转账功能不可用：站点数据库未连接")
+            return
+
+        # 双方账号存在性
+        from_u = await db.get_user(rec["user_id"])
+        if not from_u:
+            await self.store.remove(qq)
+            yield event.plain_result("你绑定的 NewAPI 账号已被站点删除，已自动解绑，请重新绑定")
+            return
+
+        t_rec = await self.store.get(t_qq)
+        if not t_rec:
+            yield event.plain_result("对方尚未绑定 NewAPI 账号，无法转账")
+            return
+        to_u = await db.get_user(t_rec["user_id"])
+        if not to_u:
+            yield event.plain_result("对方绑定的 NewAPI 账号已被站点删除，无法转账")
+            return
+
+        from_uid = int(rec["user_id"])
+        to_uid = int(t_rec["user_id"])
+        if from_uid == to_uid:
+            yield event.plain_result("不能转账给自己")
+            return
+
+        per = int(self._cfg("quota_per_unit", 500000) or 500000)
+        raw = int(round(amount_usd * per))
+        if raw < 1:
+            yield event.plain_result("转账金额太小")
+            return
+
+        # 余额预检（给用户更明确的提示）
+        if int(from_u.get("quota") or 0) < raw:
+            yield event.plain_result("转账失败：你的余额不足")
+            return
+
+        # 事务原子转账：先扣后加，任一失败整体回滚
+        ok = await db.transfer(from_uid, to_uid, raw)
+        if not ok:
+            yield event.plain_result("转账失败：扣款或入账异常，请稍后再试")
+            return
+
+        aname = getattr(event, "get_sender_name", lambda: qq)() or qq
+        tname = t_rec.get("username") or t_qq
+        text = f" 💸 转账成功！{aname} → {tname}：{self._fmt_quota(raw)}"
+        if Comp is not None:
+            try:
+                yield event.chain_result([Comp.At(qq=t_qq), Comp.Plain(text=text)])
+                return
+            except Exception:
+                pass
+        yield event.plain_result(text)
 
     # ---------- 猜大小 / 猜点数（额度小游戏，已迁移到网页） ----------
     @filter.command("猜大小", alias={"大小", "比大小"})

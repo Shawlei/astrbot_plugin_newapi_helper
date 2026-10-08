@@ -172,6 +172,12 @@
         "type": "int",
         "default": 24
       },
+      "transfer_enabled": {
+        "description": "💸 转账（需数据库）",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后支持 /转账 @某人 <金额>（按美元额度计）；同一事务内先扣发起者再入账接收者，任一失败整体回滚，真实扣除/增加站点余额"
+      },
       "rob_enabled": {
         "description": "🔪 抢劫玩法（需数据库）",
         "type": "bool",
